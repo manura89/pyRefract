@@ -1,0 +1,74 @@
+{
+    "100_110": {
+        "crack_front": "001",
+        "crack_plane": "100",
+        "emission_plane": "110",
+        "burgers_direction_leading": [ 1.0, -1.0, 1.0 ],
+        "crack_extension_direction": [ 0.0, -1.0, 0.0 ],
+        "slip_direction": [ 1.0, -1.0, 0.0 ],
+        "rotation_matrix": [
+            [ 0.0, -1.0, 0.0 ],
+            [ 1.0, 0.0, 0.0 ],
+            [ 0.0, 0.0, 1.0 ]
+        ],
+        "transformation_matrix": [
+            [ 0, 0, 1 ],
+            [ 0, -1, 0 ],
+            [ 1, 0, 0 ]
+        ]
+    },
+    "100_112": {
+        "crack_front": "011",
+        "crack_plane": "100",
+        "emission_plane": "112",
+        "burgers_direction_leading": [ 1.0, -1.0, 1.0 ],
+        "crack_extension_direction": [ 0.0, -1.0, 1.0 ],
+        "slip_direction": [ 1.0, -1.0, 1.0 ],
+        "rotation_matrix": [
+            [ 0.0, -0.7071067811865475, 0.7071067811865475 ],
+            [ 1.0, 0.0, 0.0 ],
+            [ 0.0, 0.7071067811865475, 0.7071067811865475 ]
+        ],
+        "transformation_matrix": [
+            [ 0, 1, 1 ],
+            [ 0, -1, 1 ],
+            [ -1, 0, 0 ]
+        ]
+    },
+    "110_112": {
+        "crack_front": "1-10",
+        "crack_plane": "110",
+        "emission_plane": "112",
+        "burgers_direction_leading": [ 1.0, 1.0, -1.0 ],
+        "crack_extension_direction": [ 0.0, 0.0, -1.0 ],
+        "slip_direction": [ 1.0, 1.0, -1.0 ],
+        "rotation_matrix": [
+            [ 0.0, 0.0, -1.0 ],
+            [ 0.7071067811865475, 0.7071067811865475, 0.0 ],
+            [ 0.7071067811865475, -0.7071067811865475, 0.0 ]
+        ],
+        "transformation_matrix": [
+            [ 1, -1, 0 ],
+            [ 0, 0, -1 ],
+            [ 1, 1, 0 ]
+        ]
+    },
+    "110_110": {
+        "crack_front": "001",
+        "crack_plane": "110",
+        "emission_plane": "110",
+        "burgers_direction_leading": [ 1.0, 1.0, 1.0 ],
+        "crack_extension_direction": [ 1.0, -1.0, 0.0 ],
+        "slip_direction": [ 1.0, 1.0, 0.0 ],
+        "rotation_matrix": [
+            [ 0.7071067811865475, -0.7071067811865475, 0.0 ],
+            [ 0.7071067811865475, 0.7071067811865475, 0.0 ],
+            [ 0.0, 0.0, 1.0 ]
+        ],
+        "transformation_matrix": [
+            [ 0, 0, 1 ],
+            [ 1, -1, 0 ],
+            [ 1, 1, 0 ]
+        ]
+    }
+}

@@ -1,0 +1,50 @@
+[build-system]
+requires = ['hatchling']
+build-backend = 'hatchling.build'
+
+[tool.hatch.build.targets.wheel]
+packages = ['pyRefract']
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project]
+name = 'pyRefract'
+version = '0.0.1'
+description = 'Robust Engineering Framework for Rationalizing Alloys via Computation & Theory'
+readme = 'README.md'
+authors = [
+    { name = 'Pandula Manura Liyanage', email = 'pandula.liyanage@epfl.ch' },
+]
+requires-python = '>=3.11'
+
+dependencies = [
+    'ase',
+    'logger',
+    'mendeleev',
+    'mpi4py',
+    'numpy',
+    'pandas',
+    'pyscal3',
+]
+
+[project.optional-dependencies]
+# These are only installed when you explicitly ask for the 'dev' tools
+dev = [
+    'ruff'
+]
+
+[project.scripts]
+
+[tool.ruff]
+# Set the maximum line length (88 is the standard set by Black)
+line-length = 88
+
+# Assume Python 3.11 as the minimum version
+target-version = 'py311'
+
+[tool.ruff.lint]
+# Select the rules you want it to enforce
+# 'E' and 'F' are standard bug/style checks, 'I' automatically sorts your imports
+select = ['E', 'F', 'I']
+

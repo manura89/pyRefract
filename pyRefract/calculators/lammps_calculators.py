@@ -17,7 +17,7 @@ from ..utils.cell_manipulation import (
 from ..utils.misc import (
     rule_of_mixtures_lattice,
 )
-from .lmp_cmds import kokkos, kokkos_no_output, lammps_header, lammps_surface_header
+from .lmp_cmds import kokkos_no_output, lammps_header
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["OMP_PROC_BIND"] = "spread"
@@ -257,38 +257,36 @@ def get_deformed_pressures(
 
     deformed_atoms.set_cell(cell, scale_atoms=True)
 
-    lmp = lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm)
-    lmp.commands_list(lammps_header)
-    with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
-        write(
-            tmp.name,
-            deformed_atoms,
-            format="lammps-data",
-            atom_style="atomic",
-            specorder=elements,
+    with lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm) as lmp:
+        lmp.commands_list(lammps_header)
+        with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
+            write(
+                tmp.name,
+                deformed_atoms,
+                format="lammps-data",
+                atom_style="atomic",
+                specorder=elements,
+            )
+
+            lmp.commands_string(f"read_data {tmp.name}")
+        lmp.commands_list(potential_cmd)
+        lmp = position_relaxation(lmp)
+
+        lmp.commands_list(
+            [
+                "variable pxx1 equal pxx",
+                "variable pyy1 equal pyy",
+                "variable pzz1 equal pzz",
+                "variable pyz1 equal pyz",
+                "variable pxz1 equal pxz",
+                "variable pxy1 equal pxy",
+            ]
         )
 
-        lmp.commands_string(f"read_data {tmp.name}")
-    lmp.commands_list(potential_cmd)
-    lmp = position_relaxation(lmp)
-
-    lmp.commands_list(
-        [
-            "variable pxx1 equal pxx",
-            "variable pyy1 equal pyy",
-            "variable pzz1 equal pzz",
-            "variable pyz1 equal pyz",
-            "variable pxz1 equal pxz",
-            "variable pxy1 equal pxy",
+        variables = [
+            lmp.extract_variable(v, None)
+            for v in ["pxx1", "pyy1", "pzz1", "pyz1", "pxz1", "pxy1"]
         ]
-    )
-
-    variables = [
-        lmp.extract_variable(v, None)
-        for v in ["pxx1", "pyy1", "pzz1", "pyz1", "pxz1", "pxy1"]
-    ]
-
-    lmp.close()
 
     return variables
 
@@ -305,25 +303,32 @@ def lammps_elastic_properties(
     check_cna: bool = True,
     save_relaxed_structure: bool = False,
     save_path: str | None = None,
-    complete_lammps: bool = True,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
     Calculate elastic properties using LAMMPS for a given set of elements and
     concentrations.
 
     Args:
-        elements (list[str]): List of chemical elements.
-        concentrations (list[float]): List of concentrations corresponding to
-        the elements.
+        elements (list[str]): List of elements in the alloy.
+        concentrations (list[float]): Concentrations (atomic) of the elements.
         transformation_matrix (list[list[float]] | np.ndarray): Transformation
-        matrix for the supercell.
-        offset (list[float] | np.ndarray): Initial translation offset for the
-        supercell.
+            matrix for the structure.
+        offset (list[float] | np.ndarray): Offset of the atomic positions (in
+            fractions of the lattice parameter) to avoid atoms moving across the
+            simulation box.
         potential_cmd (list[str]): LAMMPS commands for the potential.
-        nimages (int): Number of images to generate for the calculations.
-        structure_type (str, optional): Crystal structure type. Defaults to
-        'bcc'. lmp_initialize_cmds (list[str], optional): LAMMPS initialization
-        commands. Defaults to kokkos_no_output.
+        nimages (int): Number of images for the calculation.
+        structure_type (str, optional): Type of crystal structure. Defaults to
+            "bcc".
+        lmp_initialize_cmds (list[str], optional): LAMMPS initialization
+            commands. Defaults to kokkos_no_output.
+        check_cna (bool, optional): Whether to check CNA. Defaults to True.
+        save_relaxed_structure (bool, optional): Whether to save the relaxed
+            structure. Defaults to False.
+        save_path (str | None, optional): Path to save the relaxed structure.
+            Defaults to None.
+        complete_lammps (bool, optional): To run the finalize LAMMPS. True if
+            no other LAMMPS calculations are needed. Defaults to True.
 
     Returns:
         tuple[dict[str, float], dict[str, float]]: A tuple containing two
@@ -371,59 +376,53 @@ def lammps_elastic_properties(
     strain = 1e-6
 
     for n in range(1, nimages + 1):
-        lmp = lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm)
-        lmp.commands_list(lammps_header)
+        with lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm) as lmp:
+            lmp.commands_list(lammps_header)
 
-        atoms = random_ordering(base_atoms.copy(), elements, concentrations)
+            atoms = random_ordering(base_atoms.copy(), elements, concentrations)
 
-        with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
-            write(
-                tmp.name,
-                atoms,
-                format="lammps-data",
-                atom_style="atomic",
-                specorder=elements,
+            with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
+                write(
+                    tmp.name,
+                    atoms,
+                    format="lammps-data",
+                    atom_style="atomic",
+                    specorder=elements,
+                )
+
+                lmp.commands_string(f"read_data {tmp.name}")
+            lmp.commands_list(potential_cmd)
+
+            lmp = volume_relaxation(lmp)
+
+            lmp.commands_list(
+                [
+                    "variable pxx0 equal pxx",
+                    "variable pyy0 equal pyy",
+                    "variable pzz0 equal pzz",
+                    "variable pyz0 equal pyz",
+                    "variable pxz0 equal pxz",
+                    "variable pxy0 equal pxy",
+                ]
             )
 
-            lmp.commands_string(f"read_data {tmp.name}")
-        lmp.commands_list(potential_cmd)
+            relaxed_atoms = lammps_to_ase(lmp, elements)
 
-        # Volume relaxation for the current image.
+            if save_relaxed_structure:
+                save_file = save_dir / f"lammps_elastic_{alloy_name}_{n}.vasp"
+                write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
 
-        lmp = volume_relaxation(lmp)
+            if check_cna:
+                cna_classification = get_cna_classification(relaxed_atoms)
+                if not cna_classification:
+                    continue
 
-        lmp.commands_list(
-            [
-                "variable pxx0 equal pxx",
-                "variable pyy0 equal pyy",
-                "variable pzz0 equal pzz",
-                "variable pyz0 equal pyz",
-                "variable pxz0 equal pxz",
-                "variable pxy0 equal pxy",
-            ]
-        )
-
-        # The relaxed pressures for the current image
-
-        relaxed_atoms = lammps_to_ase(lmp, elements)
-
-        if save_relaxed_structure:
-            save_file = save_dir / f"lammps_elastic_{alloy_name}_{n}.vasp"
-            write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
-
-        if check_cna:
-            cna_classification = get_cna_classification(relaxed_atoms)
-            if not cna_classification:
-                continue
-
-        pxx0 = lmp.extract_variable("pxx0", None)
-        pyy0 = lmp.extract_variable("pyy0", None)
-        pzz0 = lmp.extract_variable("pzz0", None)
-        pyz0 = lmp.extract_variable("pyz0", None)
-        pxz0 = lmp.extract_variable("pxz0", None)
-        pxy0 = lmp.extract_variable("pxy0", None)
-
-        lmp.close()
+            pxx0 = lmp.extract_variable("pxx0", None)
+            pyy0 = lmp.extract_variable("pyy0", None)
+            pzz0 = lmp.extract_variable("pzz0", None)
+            pyz0 = lmp.extract_variable("pyz0", None)
+            pxz0 = lmp.extract_variable("pxz0", None)
+            pxy0 = lmp.extract_variable("pxy0", None)
 
         # Elastic tensor as a 6x6 matrix
 
@@ -526,7 +525,6 @@ def lammps_elastic_properties(
             image_lattice_parameters["c"].append(
                 cell_par[2] / transformation_matrix[2, 2]
             )
-    # Average elastic and lattice parameters across all images.
 
     if not image_elastic_parameters["C11"]:
         print("No valid images passed the CNA classification.")
@@ -541,7 +539,136 @@ def lammps_elastic_properties(
         for param, values in image_lattice_parameters.items()
     }
 
-    if complete_lammps:
-        lmp.finalize()
-
     return lattice_parameters, elastic_parameters
+
+
+def lammps_surface_energy(
+    elements: list[str],
+    concentrations: list[float] | np.ndarray,
+    transformation_matrix: list[list[int]] | np.ndarray,
+    plane: str,
+    offset: list[float] | np.ndarray,
+    potential_cmd: list[str],
+    structure_type: str = "bcc",
+    lmp_initialize_cmds: list[str] = kokkos_no_output,
+    nimages: int = 3,
+    check_cna: bool = True,
+    save_relaxed_structure: bool = False,
+    save_path: str | None = None,
+) -> tuple[float, float]:
+    """
+    Calculate the surface energy using LAMMPS.
+
+    Args:
+        elements (list[str]): List of element symbols.
+        concentrations (list[float] | np.ndarray): List or array of element
+            concentrations.
+        transformation_matrix (list[list[float]] | np.ndarray): Transformation
+            matrix for supercell construction.
+        plane (str): Surface plane for which the surface energy is being
+            calculated.
+        offset (list[float] | np.ndarray): Offset for supercell construction.
+        potential_cmd (list[str]): LAMMPS commands for the potential.
+        structure_type (str, optional): Crystal structure type (default is
+            'bcc').
+        nimages (int, optional): Number of images for the calculation (default
+            is 3).
+        check_cna (bool, optional): Whether to check CNA classification (default
+        is True).
+        save_relaxed_structure (bool, optional): Whether to save the relaxed
+            structure (default is False).
+        save_path (str | None, optional): Path to save the relaxed structure if
+            save_relaxed_structure is True (default is None).
+        complete_lammps (bool, optional): To run the finalize LAMMPS. True if
+            no other LAMMPS calculations are needed. Defaults to True.
+
+    Returns:
+        tuple[float, float]: A tuple containing the mean surface energy, and the
+        standard deviation.
+    """
+    comm = MPI.COMM_WORLD
+    SF = 1.602176634e4
+    a = rule_of_mixtures_lattice(
+        elements,
+        concentrations,
+        element_values=None,
+    )
+
+    if save_relaxed_structure and save_path is None:
+        save_path = "relaxed_structures"
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+    elif save_relaxed_structure and save_path is not None:
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+    alloy_name = "".join(
+        f"{el}{int(conc * 100)}" for el, conc in zip(elements, concentrations)
+    )
+
+    prim = bulk(name=elements[0], crystalstructure=structure_type, a=a)
+    image_surface_energy = []
+
+    base_atoms = make_supercell(prim, transformation_matrix)
+    base_atoms.translate(a * np.array(offset))
+    base_atoms = convert_to_lammps_coordinates(base_atoms)
+
+    for n in range(1, nimages + 1):
+        lmp = lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm)
+        lmp.commands_list(lammps_header)
+
+        atoms = random_ordering(base_atoms.copy(), elements, concentrations)
+        with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
+            write(
+                tmp.name,
+                atoms,
+                format="lammps-data",
+                atom_style="atomic",
+                specorder=elements,
+            )
+
+            lmp.commands_string(f"read_data {tmp.name}")
+        lmp.commands_list(potential_cmd)
+        lmp.commands_list(
+            ["compute peratom all pe/atom", "compute eatoms all reduce sum c_peratom"]
+        )
+
+        lmp = volume_relaxation(lmp)
+
+        relaxed_atoms = lammps_to_ase(lmp, elements)
+
+        if save_relaxed_structure:
+            save_file = save_dir / f"lammps_surface-bulk_{plane}_{alloy_name}_{n}.vasp"
+            write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
+
+        if check_cna:
+            cna_classification = get_cna_classification(relaxed_atoms)
+            if not cna_classification:
+                continue
+
+        lmp.commands_list(["variable lx0 equal lx", "variable ly0 equal ly"])
+
+        lx = lmp.extract_variable("lx0", None)
+        ly = lmp.extract_variable("ly0", None)
+        e0 = lmp.extract_compute("eatoms", 0, 0)
+
+        lmp.commands_string("change_box all z delta 0.0 10.0 units box")
+
+        lmp = position_relaxation(lmp)
+
+        ef = lmp.extract_compute("eatoms", 0, 0)
+
+        image_surface_energy.append((ef - e0) * SF / (2 * lx * ly))
+
+        surface_atoms = lammps_to_ase(lmp, elements)
+        if save_relaxed_structure:
+            save_file = save_dir / f"lammps_surface_{plane}_{alloy_name}_{n}.vasp"
+            write(save_file, surface_atoms, format="vasp", sort=True, direct=True)
+
+        lmp.close()
+
+    if not image_surface_energy:
+        print("No valid images passed the CNA classification.")
+        return None
+
+    return (np.mean(image_surface_energy), np.std(image_surface_energy))

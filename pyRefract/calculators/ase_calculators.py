@@ -237,3 +237,114 @@ def ase_elastic_properties(
     }
 
     return lattice_parameters, elastic_parameters
+
+
+def ase_surface_energy(
+    elements: list[str],
+    concentrations: list[float],
+    transformation_matrix: list[list[float]] | np.ndarray,
+    plane: str,
+    offset: list[float] | np.ndarray,
+    calc,
+    structure_type: str = "bcc",
+    nimages: int = 3,
+    check_cna: bool = True,
+    save_relaxed_structure: bool = False,
+    save_path: str | None = None,
+) -> tuple[float, float]:
+    """
+    Calculate the surface energy for a given set of elements and concentrations
+    using ASE.
+
+    Args:
+        elements (list[str]): List of element symbols.
+        concentrations (list[float] | np.ndarray): List or array of element
+            concentrations.
+        transformation_matrix (list[list[float]] | np.ndarray): Transformation
+            matrix for supercell construction.
+        plane (str): Surface plane for which the surface energy is being
+            calculated.
+        offset (list[float] | np.ndarray): Offset for supercell construction.
+        calc: Calculator object.
+        structure_type (str, optional): Crystal structure type (default is
+            'bcc').
+        nimages (int, optional): Number of images for the calculation (default
+            is 3).
+        check_cna (bool, optional): Whether to check CNA classification (default
+        is True).
+        save_relaxed_structure (bool, optional): Whether to save the relaxed
+            structure (default is False).
+        save_path (str | None, optional): Path to save the relaxed structure if
+            save_relaxed_structure is True (default is None).
+    Returns:
+        tuple[float, float]: The calculated surface energy and its standard
+            deviation as a tuple.
+    """
+    SF = 1.602176634e4
+    a = rule_of_mixtures_lattice(
+        elements,
+        concentrations,
+        element_values=None,
+    )
+
+    if save_relaxed_structure and save_path is None:
+        save_path = "relaxed_structures"
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+    elif save_relaxed_structure and save_path is not None:
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+    alloy_name = "".join(
+        f"{el}{int(conc * 100)}" for el, conc in zip(elements, concentrations)
+    )
+
+    prim = bulk(name=elements[0], crystalstructure=structure_type, a=a)
+    image_surface_energies = []
+
+    base_atoms = make_supercell(prim, transformation_matrix)
+    base_atoms.translate(a * np.array(offset))
+    base_atoms = convert_to_lammps_coordinates(base_atoms)
+
+    for n in range(1, nimages + 1):
+        atoms = random_ordering(base_atoms.copy(), elements, concentrations)
+        relaxed_atoms = volume_relaxation(atoms, calc=calc)
+        relaxed_atoms = convert_to_lammps_coordinates(relaxed_atoms)
+        relaxed_atoms.calc = calc
+
+        if save_relaxed_structure:
+            save_file = save_dir / f"ase_surface-bulk_{plane}_{alloy_name}_{n}.vasp"
+            write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
+
+        if check_cna:
+            cna_classification = get_cna_classification(
+                relaxed_atoms, structure_type=structure_type
+            )
+            if not cna_classification:
+                continue
+
+        cell = relaxed_atoms.get_cell()
+        energy_0 = relaxed_atoms.get_potential_energy()
+
+        area = 2 * np.linalg.norm(np.cross(cell[0], cell[1]))
+
+        surface_atoms = relaxed_atoms.copy()
+        surface_cell = surface_atoms.get_cell()
+        surface_cell[2, 2] += 10.0
+
+        surface_atoms.set_cell(surface_cell, scale_atoms=False)
+        surface_atoms = atom_relaxation(surface_atoms, calc=calc)
+
+        if save_relaxed_structure:
+            save_file = save_dir / f"ase_surface_{plane}_{alloy_name}_{n}.vasp"
+            write(save_file, surface_atoms, format="vasp", sort=True, direct=True)
+
+        energy_f = surface_atoms.get_potential_energy()
+
+        image_surface_energies.append((energy_f - energy_0) * SF / area)
+
+    if not image_surface_energies:
+        print("No valid images passed the CNA classification.")
+        return None
+
+    return (np.mean(image_surface_energies), np.std(image_surface_energies))

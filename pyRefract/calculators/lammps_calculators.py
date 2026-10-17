@@ -557,7 +557,8 @@ def lammps_surface_energy(
     save_path: str | None = None,
 ) -> tuple[float, float]:
     """
-    Calculate the surface energy using LAMMPS.
+    Calculate the surface energy for a given set of elements and concentrations
+    using LAMMPS.
 
     Args:
         elements (list[str]): List of element symbols.
@@ -614,61 +615,352 @@ def lammps_surface_energy(
     base_atoms = convert_to_lammps_coordinates(base_atoms)
 
     for n in range(1, nimages + 1):
-        lmp = lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm)
-        lmp.commands_list(lammps_header)
+        with lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm) as lmp:
+            lmp.commands_list(lammps_header)
 
-        atoms = random_ordering(base_atoms.copy(), elements, concentrations)
-        with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
-            write(
-                tmp.name,
-                atoms,
-                format="lammps-data",
-                atom_style="atomic",
-                specorder=elements,
+            atoms = random_ordering(base_atoms.copy(), elements, concentrations)
+            with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
+                write(
+                    tmp.name,
+                    atoms,
+                    format="lammps-data",
+                    atom_style="atomic",
+                    specorder=elements,
+                )
+
+                lmp.commands_string(f"read_data {tmp.name}")
+            lmp.commands_list(potential_cmd)
+            lmp.commands_list(
+                [
+                    "compute peratom all pe/atom",
+                    "compute eatoms all reduce sum c_peratom",
+                ]
             )
 
-            lmp.commands_string(f"read_data {tmp.name}")
-        lmp.commands_list(potential_cmd)
-        lmp.commands_list(
-            ["compute peratom all pe/atom", "compute eatoms all reduce sum c_peratom"]
-        )
+            lmp = volume_relaxation(lmp)
 
-        lmp = volume_relaxation(lmp)
+            relaxed_atoms = lammps_to_ase(lmp, elements)
 
-        relaxed_atoms = lammps_to_ase(lmp, elements)
+            if save_relaxed_structure:
+                save_file = (
+                    save_dir / f"lammps_surface-bulk_{plane}_{alloy_name}_{n}.vasp"
+                )
+                write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
 
-        if save_relaxed_structure:
-            save_file = save_dir / f"lammps_surface-bulk_{plane}_{alloy_name}_{n}.vasp"
-            write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
+            if check_cna:
+                cna_classification = get_cna_classification(relaxed_atoms)
+                if not cna_classification:
+                    continue
 
-        if check_cna:
-            cna_classification = get_cna_classification(relaxed_atoms)
-            if not cna_classification:
-                continue
+            lmp.commands_list(["variable lx0 equal lx", "variable ly0 equal ly"])
 
-        lmp.commands_list(["variable lx0 equal lx", "variable ly0 equal ly"])
+            lx = lmp.extract_variable("lx0", None)
+            ly = lmp.extract_variable("ly0", None)
+            e0 = lmp.extract_compute("eatoms", 0, 0)
 
-        lx = lmp.extract_variable("lx0", None)
-        ly = lmp.extract_variable("ly0", None)
-        e0 = lmp.extract_compute("eatoms", 0, 0)
+            lmp.commands_string("change_box all z delta 0.0 10.0 units box")
 
-        lmp.commands_string("change_box all z delta 0.0 10.0 units box")
+            lmp = position_relaxation(lmp)
 
-        lmp = position_relaxation(lmp)
+            ef = lmp.extract_compute("eatoms", 0, 0)
 
-        ef = lmp.extract_compute("eatoms", 0, 0)
+            image_surface_energy.append((ef - e0) * SF / (2 * lx * ly))
 
-        image_surface_energy.append((ef - e0) * SF / (2 * lx * ly))
-
-        surface_atoms = lammps_to_ase(lmp, elements)
-        if save_relaxed_structure:
-            save_file = save_dir / f"lammps_surface_{plane}_{alloy_name}_{n}.vasp"
-            write(save_file, surface_atoms, format="vasp", sort=True, direct=True)
-
-        lmp.close()
+            surface_atoms = lammps_to_ase(lmp, elements)
+            if save_relaxed_structure:
+                save_file = save_dir / f"lammps_surface_{plane}_{alloy_name}_{n}.vasp"
+                write(save_file, surface_atoms, format="vasp", sort=True, direct=True)
 
     if not image_surface_energy:
         print("No valid images passed the CNA classification.")
         return None
 
     return (np.mean(image_surface_energy), np.std(image_surface_energy))
+
+
+def lammps_usf_energy(
+    elements: list[str],
+    concentrations: list[float] | np.ndarray,
+    transformation_matrix: list[list[int]] | np.ndarray,
+    plane: str,
+    slip_vector: list[float] | np.ndarray,
+    usf_steps: int,
+    offset: list[float] | np.ndarray,
+    potential_cmd: list[str],
+    structure_type: str = "bcc",
+    lmp_initialize_cmds: list[str] = kokkos_no_output,
+    nimages: int = 3,
+    check_cna: bool = True,
+    save_relaxed_structure: bool = False,
+    save_path: str | None = None,
+) -> tuple[float, float]:
+    """
+    Calculate the unstable stacking fault (USF) energy for a given set of elements and
+    concentrations using LAMMPS.
+
+    Args:
+        elements (list[str]): List of element symbols.
+        concentrations (list[float] | np.ndarray): List or array of element
+            concentrations.
+        transformation_matrix (list[list[float]] | np.ndarray): Transformation
+            matrix for supercell construction.
+        plane (str): Slip plane for which the USF energy is being calculated.
+        slip_vector (list[float] | np.ndarray): Slip vector for the USF calculation.
+            This defines the direction and magnitude of the total slip applied to the
+            crystal.
+        usf_steps (int): Number of steps in the GSFE path.
+        offset (list[float] | np.ndarray): Offset for supercell construction.
+        potential_cmd (list[str]): LAMMPS commands for the potential.
+        structure_type (str, optional): Crystal structure type (default is
+            'bcc').
+        nimages (int, optional): Number of images for the calculation (default
+            is 3).
+        check_cna (bool, optional): Whether to check CNA classification (default
+        is True).
+        save_relaxed_structure (bool, optional): Whether to save the relaxed
+            structure (default is False).
+        save_path (str | None, optional): Path to save the relaxed structure if
+            save_relaxed_structure is True (default is None).
+        complete_lammps (bool, optional): To run the finalize LAMMPS. True if
+            no other LAMMPS calculations are needed. Defaults to True.
+
+    Returns:
+        tuple[float, float]: A tuple containing the mean USF energy, and the
+        standard deviation.
+    """
+    comm = MPI.COMM_WORLD
+    SF = 1.602176634e4
+    a = rule_of_mixtures_lattice(
+        elements,
+        concentrations,
+        element_values=None,
+    )
+
+    if save_relaxed_structure and save_path is None:
+        save_path = "relaxed_structures"
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+    elif save_relaxed_structure and save_path is not None:
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+    alloy_name = "".join(
+        f"{el}{int(conc * 100)}" for el, conc in zip(elements, concentrations)
+    )
+
+    prim = bulk(name=elements[0], crystalstructure=structure_type, a=a)
+    image_usf_energy = []
+
+    base_atoms = make_supercell(prim, transformation_matrix)
+    base_atoms.translate(a * np.array(offset))
+    base_atoms = convert_to_lammps_coordinates(base_atoms)
+
+    for n in range(nimages):
+        with lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm) as lmp:
+            lmp.commands_list(lammps_header)
+
+            atoms = random_ordering(base_atoms.copy(), elements, concentrations)
+            with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
+                write(
+                    tmp.name,
+                    atoms,
+                    format="lammps-data",
+                    atom_style="atomic",
+                    specorder=elements,
+                )
+
+                lmp.commands_string(f"read_data {tmp.name}")
+            lmp.commands_list(potential_cmd)
+            lmp.commands_list(
+                [
+                    "compute peratom all pe/atom",
+                    "compute eatoms all reduce sum c_peratom",
+                ]
+            )
+
+            lmp = volume_relaxation(lmp)
+
+            relaxed_atoms = lammps_to_ase(lmp, elements)
+
+            if save_relaxed_structure:
+                save_file = save_dir / f"lammps_usf-bulk_{plane}_{alloy_name}_{n}.vasp"
+                write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
+
+            if check_cna:
+                cna_classification = get_cna_classification(relaxed_atoms)
+                if not cna_classification:
+                    continue
+
+            lmp.commands_list(
+                [
+                    "variable lx0 equal lx",
+                    "variable ly0 equal ly",
+                    "variable xy0 equal xy",
+                ]
+            )
+
+            lx = lmp.extract_variable("lx0", None)
+            ly = lmp.extract_variable("ly0", None)
+            xy = lmp.extract_variable("xy0", None)
+            energy = [lmp.extract_compute("eatoms", 0, 0)]
+
+            total_slip = (
+                np.array([lx, 0, 0]) * slip_vector[0]
+                + np.array([xy, ly, 0]) * slip_vector[1]
+            )
+            slip_per_step = total_slip / usf_steps
+
+            for _ in range(usf_steps):
+                lmp.commands_string(
+                    f"change_box all xz delta {slip_per_step[0]} yz delta \
+                        {slip_per_step[1]} units box"
+                )
+                lmp = gsfe_relaxation(lmp)
+                energy.append(lmp.extract_compute("eatoms", 0, 0))
+
+            sfe = (np.array(energy) - energy[0]) * SF / (lx * ly)
+
+            usf_atoms = lammps_to_ase(lmp, elements)
+            if save_relaxed_structure:
+                save_file = save_dir / f"lammps_usf_{plane}_{alloy_name}_{n}.vasp"
+                write(save_file, usf_atoms, format="vasp", sort=True, direct=True)
+
+            image_usf_energy.append(np.max(sfe))
+
+    if not image_usf_energy:
+        print("No valid images passed the CNA classification.")
+        return None
+
+    return (np.mean(image_usf_energy), np.std(image_usf_energy))
+
+
+def lammps_slip_plane_stress(
+    elements: list[str],
+    concentrations: list[float] | np.ndarray,
+    transformation_matrix: list[list[int]] | np.ndarray,
+    plane: str,
+    slip_vector: list[float] | np.ndarray,
+    offset: list[float] | np.ndarray,
+    potential_cmd: list[str],
+    calc,
+    structure_type: str = "bcc",
+    lmp_initialize_cmds: list[str] = kokkos_no_output,
+    nimages: int = 3,
+    check_cna: bool = True,
+    save_relaxed_structure: bool = False,
+    save_path: str | None = None,
+) -> tuple[float, float]:
+    """
+    Calculate the standard deviation of the slip plane stresses for a given set of
+    elements and concentrations using LAMMPS.
+
+    Args:
+        elements (list[str]): List of element symbols.
+        concentrations (list[float] | np.ndarray): List or array of element
+            concentrations.
+        transformation_matrix (list[list[int]] | np.ndarray): Transformation
+            matrix for supercell construction.
+        plane (str): Slip plane for which the slip plane stresses are being calculated.
+        slip_vector (list[float] | np.ndarray): Slip vector for the slip plane stress
+            calculation. This is the unit vector indicating the direction of the total
+            slip of the Burgers' vector.
+        offset (list[float] | np.ndarray): Offset for supercell construction.
+        potential_cmd (list[str]): LAMMPS commands for the potential.
+        calc: ASE calculator object.
+        structure_type (str, optional): Crystal structure type (default is
+            'bcc').
+        nimages (int, optional): Number of images for the calculation (default
+            is 3).
+        check_cna (bool, optional): Whether to check CNA classification (default
+        is True).
+        save_relaxed_structure (bool, optional): Whether to save the relaxed
+            structure (default is False).
+        save_path (str | None, optional): Path to save the relaxed structure if
+            save_relaxed_structure is True (default is None).
+        complete_lammps (bool, optional): To run the finalize LAMMPS. True if
+            no other LAMMPS calculations are needed. Defaults to True.
+
+    Returns:
+        float: The standard deviation of the slip plane stresses.
+    """
+    from ..utils.misc import count_unique_within_tolerance
+    from .ase_calculators import surface_stresses
+
+    comm = MPI.COMM_WORLD
+    a = rule_of_mixtures_lattice(
+        elements,
+        concentrations,
+        element_values=None,
+    )
+
+    if save_relaxed_structure and save_path is None:
+        save_path = "relaxed_structures"
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+    elif save_relaxed_structure and save_path is not None:
+        save_dir = Path(save_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+    alloy_name = "".join(
+        f"{el}{int(conc * 100)}" for el, conc in zip(elements, concentrations)
+    )
+
+    prim = bulk(name=elements[0], crystalstructure=structure_type, a=a)
+    image_stresses = []
+
+    base_atoms = make_supercell(prim, transformation_matrix)
+    base_atoms.translate(a * np.array(offset))
+    base_atoms = convert_to_lammps_coordinates(base_atoms)
+
+    atompos = base_atoms.get_positions()
+    tatoms = len(base_atoms)
+
+    nz = count_unique_within_tolerance(atompos[:, 2], tol=0.25)
+    layer_atoms = tatoms // nz
+
+    for n in range(nimages):
+        with lammps(name="MPI", cmdargs=lmp_initialize_cmds, comm=comm) as lmp:
+            lmp.commands_list(lammps_header)
+
+            atoms = random_ordering(base_atoms.copy(), elements, concentrations)
+            with tempfile.NamedTemporaryFile(suffix=".data", delete=True) as tmp:
+                write(
+                    tmp.name,
+                    atoms,
+                    format="lammps-data",
+                    atom_style="atomic",
+                    specorder=elements,
+                )
+
+                lmp.commands_string(f"read_data {tmp.name}")
+            lmp.commands_list(potential_cmd)
+            lmp.commands_list(
+                [
+                    "compute peratom all pe/atom",
+                    "compute eatoms all reduce sum c_peratom",
+                ]
+            )
+
+            lmp = volume_relaxation(lmp)
+
+            relaxed_atoms = lammps_to_ase(lmp, elements)
+
+            if save_relaxed_structure:
+                save_file = save_dir / f"lammps_usf-bulk_{plane}_{alloy_name}_{n}.vasp"
+                write(save_file, relaxed_atoms, format="vasp", sort=True, direct=True)
+
+            if check_cna:
+                cna_classification = get_cna_classification(relaxed_atoms)
+                if not cna_classification:
+                    continue
+
+            image_slip_plane_stresses = surface_stresses(
+                relaxed_atoms, slip_vector, layer_atoms, calc
+            )
+
+            image_stresses.extend(image_slip_plane_stresses.tolist())
+
+    if not image_stresses:
+        return None
+
+    return np.std(image_stresses)
